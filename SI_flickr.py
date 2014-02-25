@@ -2,6 +2,65 @@
 import sqlite3, glob, json, sys, re, inspect, flickr_api, subprocess,os
 from datetime import datetime
 
+
+def SI_flickr_cfg():
+	return '''{
+	"PATH": "Directory to be monitored",
+	"PATH": "/data/Pictures/Published",
+
+	"EXT": "Allowed Extensions Allowed Separated by Pipes",
+	"EXT": "jpg|JPG|png|PNG",
+	
+	"TYPE": "This JSON format is specific to the Flickr plugin",
+	"TYPE": "flickr",
+
+	"ENABLED": "If set to true, this will be read and active for syncing", 
+	"ENABLED": true, 
+
+	"api_key": "Do Not Change", 
+	"api_key": "496109f8cbd00b85e12548ac0fe71699", 
+
+	"secret": "Do Not Change", 
+	"secret": "e9547c04cbca60a5", 
+
+	"title":"If blank, flickr decides.  Otherwise exiftool tags within brackets are replaced and string is split along pipe.  First non null split is used.",
+	"title":"[DateTimeOriginal]|[DigitalCreationDateTime]|[CreateDate]",
+
+	"description":"If blank, flickr decides.  Otherwise exiftool tags within brackets are replaced and string is split along pipe.  First non null split is used.",
+	"description":"",
+
+	"tags":"If blank, flickr decides.  Otherwise exiftool tags within brackets are replaced and string is split along pipe.  First non null split is used.",
+	"tags":"",
+
+	"is_public":"Set to 1 to default permission to public.  Else set to 0",
+	"is_public":0,
+
+	"is_family":"Set to 1 to default permission to family.  Else set to 0",
+	"is_family":1,
+
+	"is_friend":"Set to 1 to default permission to friend.  Else set to 0",
+	"is_friend":0,
+
+	"hidden":"Set to 1 to keep the photo in global search results, 2 to hide from public searches.",
+	"hidden":0,
+	
+	"safety_level":"Set to 1 for Safe, 2 for Moderate, or 3 for Restricted.",
+	"safety_level":1,
+
+	"async":"Set to 1 for async mode, 0 for sync mode",
+	"async":0,
+	
+	"epic_fail":"Set to the maximum failures before giving up during an upload",
+	"epic_fail":5,
+	
+	"date_posted":"If blank, flickr decides.  Otherwise select exiftool date fields to use in prefered order",
+	"date_posted":"DateTimeOriginal",
+	
+	"min_date_posted":"If using date_posted parameter.  Enter minumum unix timestamp here to send to flickr.  Dates prior will be spread out in dttm sequence over the date set in this parameters",
+	"min_date_posted":1203897600
+
+}'''
+
 class SI_flickr(object):
 
 	#GLOBALS
@@ -90,7 +149,7 @@ class SI_flickr(object):
 				a.save(cfg_file+'.oa')
 				flickr_api.set_auth_handler(a)
 			except Exception, e:
-				print 				
+				print e
 		try:	
 			user = flickr_api.test.login()
 		except Exception, e:
@@ -117,7 +176,7 @@ class SI_flickr(object):
 				return t_ps
 
 
-	def upload(self):
+	def sync(self):
 		if self.halt == 1: return
 		epicfail = self.cfg['epic_fail']
 		user = flickr_api.test.login()
@@ -185,8 +244,13 @@ class SI_flickr(object):
 					photosets = user.getPhotosets()
 
 				except Exception, e:
-					if self.verbose > 0: print file + ":" + '{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
-					status = epicfail
+
+					if str(e) == '1 : Photo "'+sk+'" not found (invalid ID)':
+						status = "DL"
+						udttm = None
+					else:
+						if self.verbose > 0: print file + ":" + '{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+						status = epicfail
 			
 
 			if status != epicfail and status != "OK":

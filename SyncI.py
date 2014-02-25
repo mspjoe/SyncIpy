@@ -1,29 +1,78 @@
 #!/usr/bin/python
 import sqlite3, glob, json, sys, inspect, subprocess, hashlib, time, os, signal
-
-from SI_flickr import SI_flickr
 from datetime import datetime,timedelta
 
+from SI_flickr import *
 
 #GLOBALS
-cfgdir = "/etc/SyncIpy/"
-dbdir = "."
-verbose = 2
+plugins = 	[
+				["flickr","SI_flickr",SI_flickr_cfg()]
+	    	]
 
+#The following is the default config diretory.  If passed from the 
+cfgdir = os.path.join(os.getenv('HOME'),".SyncIpy")
+dbdir = os.path.join(os.getenv('HOME'),".SyncIpy")
+verbose = 1
+sleep_seconds = 60
+
+pubs = []
+halt = 0
 cur_pub = None
+
+default_config='''{
+	"dbdir": "Directory for database to be stored",
+	"dbdir": "'''+str(dbdir)+'''",
+
+	"verbose": "Verbosity of output:",
+	"verbose": "Set 0 for nothing",
+	"verbose": "Set 1 for errors only",
+	"verbose": "Set 2 for errors and plugin API calls",
+	"verbose": "Set 3 for errors, plugin API calls, and db calls",
+	"verbose": "Set 4 for errors, plugin API calls, and db updates",
+	"verbose": "Set 5 for everything",
+	"verbose": '''+str(verbose)+''',
+
+	"sleep_seconds": "Delay from end of last sync to start of next sync in seconds",
+	"sleep_seconds": '''+str(sleep_seconds)+'''
+	
+}'''
 
 if len(sys.argv) == 2:
 	cfgdir = sys.argv[0]
 elif len(sys.argv) > 2:
 	print "Too many arguments provided.  A single path where config files can be found is the only argument"
 
-pubs = []
 
-halt = 0
+#Create Config Dir and Read Config if Available.  Add example config files to directory.
+if not os.path.isdir(cfgdir):
+	try:
+		print "Config Dir " + cfgdir + "does not exists.  Creating directory default config and sample pub configs."
+		os.mkdir(cfgdir)
+		f = open(os.path.join(cfgdir,"SyncIpy.cfg"),"w")
+		f.write(default_config)
+		f.close()
+		for plugin in plugins:
+			f = open(os.path.join(cfgdir,plugin[0]+".pub.sample"),"w")
+			f.write(plugin[2])
+			f.close()
+	except Exception, e:
+		print "Config Dir " + cfgdir + "does not exists and user does not have sufficiant permission to create it"
+		print str(e)
+		quit()
 
+else:
+	try:
+		j = json.load(open(os.path.join(cfgdir,'SyncIpy.cfg')))
+		verbose = int(j['verbose'])
+		dbdir = str(j['dbdir'])
+		sleep_seconds = int(j['sleep_seconds'])
+	except Exception, e:
+		print "Problems Reading " + os.path.join(cfgdir,'SyncIpy.cfg')
+		print str( e)
+		quit()
 
 #OPEN SQL
-conn = sqlite3.connect('SyncIpy.db')
+conn = sqlite3.connect(os.path.join(dbdir,'SyncIpy.db'))
 c = conn.cursor()
 c2 = conn.cursor()
 
@@ -50,8 +99,8 @@ def gen_tables():
 	
 	c.execute('CREATE UNIQUE INDEX IF NOT EXISTS "id_pubs" on PUBLISHERS ("FILE" ASC)')
 
-	for config_f in glob.glob(cfgdir+"*.pub"):
-#		print config_f
+	for config_f in glob.glob(cfgdir+"/*.pub"):
+		#print config_f
 		try:
 			j = json.load(open(config_f))
 		except Exception, e: 
@@ -155,18 +204,25 @@ def run_pubs():
 	global cur_pub
 	if verbose > 4: 	print c.execute('SELECT COUNT(PK),STATUS from PHOTOS GROUP BY STATUS').fetchall()
 	for pub in pubs:
+		cur_pub = None
 		if halt == 1: return 
 		PBT= "PB"+str(pub)
-		p = (c.execute('SELECT CONFIG FROM PUBLISHERS WHERE ID=?',[pub]).fetchall()[0])
+		p = (c.execute('SELECT CONFIG,FILE FROM PUBLISHERS WHERE ID=?',[pub]).fetchall()[0])
 		cfg = json.loads(p[0])
 		n1 = datetime.now()
 		n1 = n1.replace(microsecond = 0)
 		sys.stdout.flush()
-		#if not c.execute('SELECT COUNT(*) FROM sqlite_master where type="table" and name="'+ PBT +'"').fetchone()[0] or c.execute('SELECT COUNT(*) FROM '+PBT+' WHERE STATUS!="OK" AND STATUS!=?',[str(cfg['epic_fail'])]).fetchall()[0][0] != 0:
-		if cfg['TYPE'] == 'flickr':
-			if halt == 1: return 
-			cur_pub = SI_flickr(pub,dbdir)
-			cur_pub.upload()
+		if halt == 1: return 
+		try:
+			for plugin in plugins:
+				if cfg['TYPE'] == plugin[0]:
+					cur_pub = globals()[plugin[1]](pub,dbdir,verbose)
+		except Exception, e:
+			print e
+		if cur_pub == None:
+			"Plugin Type "+ cfg['TYPE']+" Invalid in Config " + p[1]
+		else:
+			cur_pub.sync()
 			cur_pub = None
 		n2 = datetime.now()
 		n2 = n2.replace(microsecond = 0)
@@ -193,13 +249,14 @@ for i in [x for x in dir(signal) if x.startswith("SIG")]:
 		if verbose > 4: print('Signal Handler Not Registered for ' + i)
 	
 #MAIN LOOP
-while halt == 0:
+gen_tables()
+while halt == 0 and len(pubs) > 0:
 	gen_tables()
 	if halt == 1: quit()
 	read_exifjson()
 	if halt == 1: quit()
 	run_pubs()
 	if halt == 1: quit()
-	time.sleep(60)
+	time.sleep(sleep_seconds)
 	
 conn.close()

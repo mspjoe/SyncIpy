@@ -1,15 +1,13 @@
 #!/usr/bin/python
 import sqlite3, glob, json, sys, re, inspect, flickr_api, subprocess,os
 from datetime import datetime
-
-
-
-
+import logging
 
 class SI_flickr(object):
-
+	
 	#GLOBALS
-	def __init__(self,publisher_id=None,tdbdir = None, vb=4):
+	def __init__(self,publisher_id=None,tdbdir = None):
+
 		if tdbdir == None:
 			self.dbdir = "."
 		else:
@@ -20,10 +18,10 @@ class SI_flickr(object):
 		else:
 			self.pub = publisher_id
 
-		self.verbose=vb
-
+		self.log = logging.getLogger('SyncIpy')
 		PBT = "PB"+str(self.pub)
 		self.halt = 0
+		self.photosets = None
 
 		#OPEN SQL
 		self.conn = sqlite3.connect(os.path.join(self.dbdir,'SyncIpy.db'))
@@ -31,27 +29,27 @@ class SI_flickr(object):
 		c2 = self.conn.cursor()
 		c3 = self.conn.cursor()
 
-		if self.verbose > 4: print('Loading config and settigns for '+str(PBT))
+		self.log.info('Loading config and settigns for '+str(PBT))
 		c.execute('SELECT CONFIG,FILE FROM PUBLISHERS WHERE ID=?',[self.pub])
 
 		self.cfg, file = c.fetchone()
 		self.cfg = json.loads(self.cfg)
 
 		missing_cfg = None
+		self.log.debug('Checking for missing keys in config file')
 		for key in json.loads(SI_flickr_cfg()).keys():
 			if not key in self.cfg:
 				if missing_cfg == None:
 					missing_cfg = "Please ensure the following configuration values exist in "+file+":"
-				#print key + " not in config file "
 				for line in SI_flickr_cfg().splitlines():
-					if line.startswith('	"'+key):
+					if line.strip().startswith('"'+key):
 						missing_cfg = missing_cfg + '\n' + line
 				self.halt = 1
 				missing_cfg = missing_cfg + '\n'
 
 
 		if missing_cfg != None: 
-			print missing_cfg
+			self.log.critical( missing_cfg)
 			return
 
 		if self.halt == 1: return
@@ -62,7 +60,7 @@ class SI_flickr(object):
 		epicfail = self.cfg['epic_fail']
 
 
-		if self.verbose > 4: print('Creating if not exists table '+str(PBT))
+		self.log.info('Creating if not exists table '+str(PBT))
 		c.execute(	'CREATE TABLE IF NOT EXISTS ' +PBT+ ' ('+
 					'"ID" INTEGER PRIMARY KEY AUTOINCREMENT,' +
 					'"PK" TEXT,'  		+
@@ -70,7 +68,7 @@ class SI_flickr(object):
 					'"STATUS" TEXT,'   	+
 					'"SYNCED" TEXT,'	+
 					'"UDTTM" TEXT)')
-		if self.verbose > 4: print('Creating if not exists indexes id1_'+PBT+' and id2_'+PBT+' for '+PBT)
+		self.log.info('Creating if not exists indexes id1_'+PBT+' and id2_'+PBT+' for '+PBT)
 		c.execute('CREATE UNIQUE INDEX IF NOT EXISTS id1_'+PBT+' on '+PBT+' (PK ASC)')
 		c.execute('CREATE UNIQUE INDEX IF NOT EXISTS id2_'+PBT+' on '+PBT+' (SK ASC)')
 
@@ -80,7 +78,7 @@ class SI_flickr(object):
 
 		try:
 			flickr_api.set_auth_handler(cfg_file+'.oa')
-			if self.verbose > 4: print('Loaded oauth for flickr on'+str(PBT))
+			self.log.info('Loaded oauth for flickr on'+str(PBT))
 		except:
 
 			try:
@@ -94,12 +92,12 @@ class SI_flickr(object):
 				a.save(cfg_file+'.oa')
 				flickr_api.set_auth_handler(a)
 			except Exception, e:
-				print e
+				self.log.exception(str(e))
 		try:	
 			user = flickr_api.test.login()
 		except Exception, e:
 			self.halt = 1
-			if self.verbose > 0: print "flickr_api.test.login() :" + '{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exception(str(e))
 
 	### This function helps keep SQL calls out of many other functions
 	# It does so by returning all possible data for a photo based on a few different identifiers.
@@ -108,7 +106,7 @@ class SI_flickr(object):
 	# Returns either starting kwargs if not enough info or:
 	### PHOTOS.PK, PHOTOS.SK, PUB.STATUS, PUB.UDTTM, PHOTOS.PATH, PHOTOS.FILE, PHOTOS.EXIF into pk,sk,status,uddtm,path,file,exif
 	def extend_kwargs(self,**kwargs):
-		if self.verbose > 4: print 'extend_kwargs called'
+		self.log.info('extend_kwargs called')
 		PBT = "PB"+str(self.pub)
 		c = self.conn.cursor()
 		try:
@@ -122,7 +120,7 @@ class SI_flickr(object):
 			else:
 				return kwargs
 		except Exception, e:			
-			if self.verbose > 0: print ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exception(str(e))
 			return kwargs
 	
 		kwargs['pk'],kwargs['sk'],kwargs['status'],kwargs['udttm'],kwargs['path'],kwargs['file'],raw_exif,kwargs['mdttm'] = c.fetchone()
@@ -157,12 +155,12 @@ class SI_flickr(object):
 		PBT = "PB"+str(self.pub)
 		c = self.conn.cursor()
 		c2 = self.conn.cursor()
-		print "Create: ", c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS="NW"').fetchone()[0]
-		print "Change: ", c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS="XO"').fetchone()[0]
-		print "Retry:  ", c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS!="XO" AND '+PBT+'.STATUS!="NW" AND '+PBT+'.STATUS!="OK" AND '+PBT+'.STATUS!=?',[epicfail]).fetchone()[0]
-		print "Fail:   ", c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS=?',[epicfail]).fetchone()[0]
-		print "Remove: ", c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="RM"').fetchone()[0]			
-		print "Total:  ",c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="RM"').fetchone()[0] + c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS!="OK" AND '+PBT+'.STATUS!=?',[epicfail]).fetchone()[0]
+		self.log.info( "Create: " + str(c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS="NW"').fetchone()[0]))
+		self.log.info( "Change: " + str(c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS="XO"').fetchone()[0]))
+		self.log.info( "Retry:  " + str(c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS!="XO" AND '+PBT+'.STATUS!="NW" AND '+PBT+'.STATUS!="OK" AND '+PBT+'.STATUS!=?',[epicfail]).fetchone()[0]))
+		self.log.info( "Fail:   " + str(c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS=?',[epicfail]).fetchone()[0]))
+		self.log.info( "Remove: " + str(c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="RM"').fetchone()[0]))
+		self.log.info( "Total:  " + str(c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="RM"').fetchone()[0] + c.execute('SELECT COUNT('+PBT+'.PK) FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="OK" AND '+PBT+'.STATUS!="OK" AND '+PBT+'.STATUS!=?',[epicfail]).fetchone()[0]))
 
 		
 	# Uploads os.path.join(path,file) to flickr and returns flicker photo id. 
@@ -175,7 +173,7 @@ class SI_flickr(object):
 			fp = flickr_api.upload(photo_file = os.path.join(kwargs['path'],kwargs['file']))
 			return fp['id']
 		except Exception, e: 
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exception(str(e))
 			return 0
 
 	# Deletes photo with flicker service ID of fp/sk. Returns 1 if no longer on flickr.
@@ -192,14 +190,14 @@ class SI_flickr(object):
 			else:
 				fp = flickr_api.Photo(id=kwargs['sk'])
 
-			if self.verbose > 2: print('... Deleting From Flickr '+ self.current_file) 
+			self.log.info(self.current_file+": Deleting From Flickr")
 			fp.delete()
 		except Exception, e:
 
 			if type(e) ==  flickr_api.flickrerrors.FlickrAPIError and e.code == 1:
-				if self.verbose > 2: print('... Photo Not on Flickr')
+				self.log.info(self.current_file+": File Already Deleted on Flickr.  Continuing")
 			else:
-				if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+				self.log.info(self.current_file+ ": " + str(e))
 				return 0
 		self.photosets = None
 		return 1
@@ -210,7 +208,8 @@ class SI_flickr(object):
 	def replace_photo(self,**kwargs):
 		if not 'file' in kwargs or not 'path' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): kwargs = extend_kwargs(**kwargs)
 		if not 'file' in kwargs or not 'path' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): return -1
-
+		
+		self.logging.info(file)
 		rv = self.delete_photo(**kwargs)
 		if rv < 1: 
 			return rv
@@ -238,10 +237,10 @@ class SI_flickr(object):
 			if udttm < self.cfg['min_date_posted']:
 				udttm = self.cfg['min_date_posted'] + (udttm / 35000)
 			fp.setDates(date_posted=str(udttm))
-			if self.verbose > 2: print('... Set Date to ' + str(udttm))
+			self.log.info(self.current_file+": Setting Date to " + str(udttm))
 
 		except Exception, e:
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exeception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -266,7 +265,7 @@ class SI_flickr(object):
 				fp = flickr_api.Photo(id=kwargs['sk'])
 			fp.setMeta(**arg_list)
 		except Exception, e:
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exeception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -285,7 +284,7 @@ class SI_flickr(object):
 				fp = flickr_api.Photo(id=kwargs['sk'])
 			fp.setPerms(is_public=self.cfg['is_public'],is_friend=self.cfg['is_friend'],is_family=self.cfg['is_family'],perm_comment=self.cfg['perm_comment'],perm_addmeta=self.cfg['perm_addmeta'])
 		except Exception, e:
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exeception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -305,7 +304,7 @@ class SI_flickr(object):
 
 			fp.setSafetyLevel(hidden=self.cfg['hidden'],safety_level=self.cfg['safety_level'])
 		except Exception, e:
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exeception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -316,7 +315,7 @@ class SI_flickr(object):
 	def set_photo_tags(self,**kwargs):
 		if not 'exif' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): kwargs = self.extend_kwargs(**kwargs)
 		if not 'exif' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): return -1
-
+		
 		tag_set = []
 
 		for tag_source in self.cfg['tags'].split(','):
@@ -331,7 +330,7 @@ class SI_flickr(object):
 			if tags == '': tags = '"'+tag+'"'
 			else:				tags = tags + ', "'+ tag + '"'
 		
-		if self.verbose > 4: print self.current_file + ': Setting Tags To ' + tags
+		self.log.info(self.current_file + ': Setting Tags To ' + tags)
 		try:
 			if 'fp' in kwargs:
 				fp = kwargs['fp']
@@ -339,7 +338,7 @@ class SI_flickr(object):
 				fp = flickr_api.Photo(id=kwargs['sk'])
 			fp.setTags(tags)
 		except Exception, e:
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exeception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 	
@@ -350,7 +349,6 @@ class SI_flickr(object):
 	def set_photo_photosets(self, **kwargs):
 		if not 'exif' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): kwargs = self.extend_kwargs(**kwargs)
 		if not 'exif' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): return -1
-
 
 		desired_ps = []
 		try:
@@ -385,36 +383,35 @@ class SI_flickr(object):
 					if ppps.title in desired_ps:
 						current_ps.append(ppps.title)
 					else:
-						print "remove photo from",ppps.title,ppps.id
+						self.log.info(self.current_file + ': Removing Photo From Photoset ' + ppps.title + ' [' + ppps.id +']')
 						try:
 							ppps.removePhoto(fp)
 						except Exception, e:
-							if self.verbose > 0: print file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+							self.log.exeception(self.current_file + ': ' +str(e))
 							return 0
 
 			for dps in desired_ps:
 				if not dps in current_ps:
-					print "Add to PS", dps
 					psk = None
 					if self.photosets == None:
+						self.log.debug(self.current_file + ': Reading Photosets From Flickr')
 						self.photosets = flickr_api.test.login().getPhotosets()
 					for ps in self.photosets:
 						if str(ps['title']) == str(dps):
 							psk = ps
 					if psk == None:
 						photoset = flickr_api.Photoset.create(title = str(dps), primary_photo = fp)
-						if self.verbose > 2: print('... Creating Photoset ' + str(dps))
+						self.log.info(self.current_file + ': Creating Photoset ' + str(dps))
 						self.photosets = None
-
 					else:
 						try:
 							psk.addPhoto(photo = fp)
-							if self.verbose > 2: print('... Adding to Photoset ' + str(dps))
+							self.log.info(self.current_file + ': Adding to Photoset ' + str(dps))
 						except Exception, e:
-							if self.verbose > 0: print file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+							self.log.exeception(self.current_file + ': ' +str(e))
 							return 0
 		except Exception, e:
-			if self.verbose > 0: print self.current_file + ':{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+			self.log.exeception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -426,34 +423,32 @@ class SI_flickr(object):
 		PBT = "PB"+str(self.pub)
 		c  = self.conn.cursor()
 		c2 = self.conn.cursor()
-		c3 = self.conn.cursor()
 
 		epicfail = self.cfg['epic_fail']
 		
-		for tc in c.execute(	'SELECT '+PBT+'.PK,'+PBT+'.SK,PHOTOS.FILE FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="RM"'):
+		for photo in c.execute(	'SELECT '+PBT+'.PK,'+PBT+'.SK,PHOTOS.FILE FROM '+PBT+', PHOTOS WHERE PHOTOS.PK = '+PBT+'.PK AND PHOTOS.STATUS="RM"'):
 			if self.halt != 1:
-				pk,sk,file = tc
-				self.current_file = file
+				pk,sk,self.current_file = photo
+				 
+				self.log.info(self.current_file + ": Deleting From Flickr")
 				if self.delete_photo(sk=sk) == 1:
 					c2.execute('DELETE FROM '+PBT+' WHERE pk=?',[pk])
+					self.log.info(self.current_file + ": Deleting From DB Table " + PBT)
 		self.conn.commit()
 
 		for photo in c.execute('SELECT PK,PATH,FILE FROM PHOTOS WHERE STATUS="OK" AND PK NOT IN (SELECT PK FROM '+PBT+') AND PATH LIKE ?',[self.cfg['PATH']+"%"]):
-			if self.verbose > 3: print('Inserting into '+PBT+' '+photo[1]+'/'+photo[2] + ' | ' + photo[0] )
+			pk,path,self.current_file = photo
+			self.log.info(self.current_file + ": Inserting as NW into " + PBT)
 			c2.execute('INSERT INTO '+PBT+' (PK,SK,STATUS) VALUES (?,?,?)',[photo[0],"TEMPSK_"+photo[0],"NW"])
 		self.conn.commit()
-
 
 		for tc in c.execute('SELECT PK FROM '+ PBT + ' WHERE STATUS!="OK" AND STATUS!=?',[epicfail]):
 			if self.halt == 1: return
 			c2.execute('SELECT '+PBT+'.PK,'+PBT+'.SK, '+PBT+'.STATUS, '+PBT+'.UDTTM, PHOTOS.PATH, PHOTOS.FILE ,PHOTOS.EXIF,PHOTOS.MDTTM,'+PBT+'.SYNCED FROM '+PBT+ 
 					', PHOTOS WHERE PHOTOS.PK='+PBT+'.PK AND PHOTOS.PK=?',[tc[0]])
-
-
 			
 			pk, sk, status, udttm, path,file,raw_exif,mdttm,synced_raw = c2.fetchone()
 			
-
 			exif = json.loads(raw_exif)
 			self.current_file = str(file)
 			try:
@@ -468,13 +463,17 @@ class SI_flickr(object):
 			else:
 				synced = json.loads(synced_raw)
 
-			print 'START:' + str(self.current_file) + ":" + str(synced)
+			self.log.info(self.current_file + ": Sync Starting With Status " + str(synced))
 
 			if synced['I'] == 1 or udttm != None:
 				try:
 					fp = flickr_api.Photo(id=sk)
 				except Exception, e:
-					print e
+					if type(e) ==  flickr_api.flickrerrors.FlickrAPIError and e.code == 1:
+						fp = None
+						synced['I'] = 0
+					else:
+						self.log.info(self.current_file+ ": " + str(e))
 
 			try:
 				udttm =  os.path.getmtime(os.path.join(path,file))
@@ -483,11 +482,10 @@ class SI_flickr(object):
 
 			if fp != None:
 				rv = self.replace_photo(fp=fp, file=file, path=path)
-			elif synced:
+			elif synced['I'] == 0:
 				rv = self.upload_photo(sk=sk, file=file, path=path)
 			
 			if rv < 1 :
-				print pk, sk, status, udttm, path,file,synced_raw
 				status = status + 1
 				fp = None
 			elif rv == 1:
@@ -501,11 +499,9 @@ class SI_flickr(object):
 				except Exception, e:
 					fp = None
 					status = status + 1
-					print e
-			
+					self.log.info(self.current_file+ ": " + str(e))
 
 			if fp != None:
-				
 				
 				if synced['S'] != 1: synced['S'] = self.set_photo_photosets(fp=fp, sk=sk, exif=exif)
 				if synced['T'] != 1: synced['T'] = self.set_photo_tags(fp=fp, sk=sk, exif=exif)
@@ -519,17 +515,15 @@ class SI_flickr(object):
 			if sum(synced.values()) == len(synced):
 				status = 'OK'
 
-			print 'END:' + str(self.current_file) + ":" + str(synced)
-
-
-
+			self.log.info(self.current_file + ": Sync Ending With Status " + str(synced))
+			
 			c2.execute('UPDATE '+PBT+' SET STATUS=?, SK=?, UDTTM=?, SYNCED=? WHERE PK=?',[status,sk,udttm,synced_raw,pk])
 			self.conn.commit()
 			
 
 
 def SI_flickr_cfg():
-	return '''{
+	return ''' {
 
 	"PATH": "Directory to be monitored",
 	"PATH": "/Users/Joe/Desktop/Temp/test",
@@ -597,4 +591,4 @@ def SI_flickr_cfg():
 	"min_date_posted":"If using date_posted parameter.  Enter minumum unix timestamp here to send to flickr.  This date has to be after your flickr join date.  Dates prior will be spread out in dttm sequence over the date set in this parameters",
 	"min_date_posted":1203897600
 
-}'''
+ }'''

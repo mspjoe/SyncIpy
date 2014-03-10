@@ -1,54 +1,55 @@
 #!/usr/bin/python
 import sqlite3, glob, json, sys, inspect, subprocess, hashlib, time, os, signal
 from datetime import datetime,timedelta
-
 from SI_flickr import *
+import logging
+
 
 #GLOBALS
 plugins = 	[
 				["flickr","SI_flickr",SI_flickr_cfg()]
 	    	]
-
+			
 #The following is the default config diretory.  If passed from the 
 cfgdir = os.path.join(os.getenv('HOME'),".SyncIpy")
 dbdir = os.path.join(os.getenv('HOME'),".SyncIpy")
-verbose = 1
 sleep_seconds = 60
 
 pubs = []
 halt = 0
 cur_pub = None
+cfg = {}
 
-default_config='''{
+#Init Log
+formatter = logging.Formatter(fmt='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+log = logging.getLogger('SyncIpy')
+log.addHandler(handler)
+
+default_config=''' {
 	"dbdir": "Directory for database to be stored",
 	"dbdir": "'''+str(dbdir)+'''",
 
-	"verbose": "Verbosity of output:",
-	"verbose": "Set 0 for nothing",
-	"verbose": "Set 1 for errors only",
-	"verbose": "Set 2 for errors and plugin API calls",
-	"verbose": "Set 3 for errors, plugin API calls, and db calls",
-	"verbose": "Set 4 for errors, plugin API calls, and db updates",
-	"verbose": "Set 5 for everything",
-	"verbose": '''+str(verbose)+''',
+	"log_level": "Verbosity of log level output.  Choose from: CRITICAL, ERROR, WARNING, INFO, DEBUG",
+	"log_level": "CRITICAL",
 
 	"sleep_seconds": "Delay from end of last sync to start of next sync in seconds",
 	"sleep_seconds": '''+str(sleep_seconds)+'''
-	
-}'''
+ }'''
 
 if len(sys.argv) == 2:
 	cfgdir = sys.argv[0]
 elif len(sys.argv) > 2:
-	print "Too many arguments provided.  A single path where config files can be found is the only argument"
-
+	log.critical("Too many arguments provided.  A single path where config files can be found is the only argument")
+	quit()
 
 #Create Config Dir and Read Config if Available.  Add example config files to directory.
 if not os.path.isdir(cfgdir):
 	try:
-		print "Config Dir " + cfgdir + "does not exists.  Creating directory default config and sample pub configs."
+		log.info("Config Dir " + cfgdir + "does not exists.  Creating directory default config and sample pub configs.")
 		os.mkdir(cfgdir)
-		f = open(os.path.join(cfgdir,"SyncIpy.cfg"),"w")
+		f = open(os.path.join(cfgdir,"SyncIpy.cfg.sample"),"w")
 		f.write(default_config)
 		f.close()
 		for plugin in plugins:
@@ -56,25 +57,48 @@ if not os.path.isdir(cfgdir):
 			f.write(plugin[2])
 			f.close()
 	except Exception, e:
-		print "Config Dir " + cfgdir + "does not exists and user does not have sufficiant permission to create it"
-		print str(e)
+		log.critical("Config Dir " + cfgdir + "does not exists and user does not have sufficiant permission to create it")
+		log.exception(str(e))
 		quit()
-
 else:
 	try:
-		j = json.load(open(os.path.join(cfgdir,'SyncIpy.cfg')))
-		verbose = int(j['verbose'])
-		dbdir = str(j['dbdir'])
-		sleep_seconds = int(j['sleep_seconds'])
+		cfg = json.load(open(os.path.join(cfgdir,'SyncIpy.cfg')))
 	except Exception, e:
-		print "Problems Reading " + os.path.join(cfgdir,'SyncIpy.cfg')
-		print str( e)
+		log.critical("Problems Reading " + os.path.join(cfgdir,'SyncIpy.cfg') +"\nPlease ensure file is created and is properly formatted" )
+		log.exception(str(e))
 		quit()
 
+missing_cfg = None
+for key in json.loads(default_config).keys():
+	if not key in cfg :
+		if missing_cfg == None:
+			missing_cfg = "Please ensure the following configuration values exist in SyncIpy.cfg:"
+		for line in default_config.splitlines():
+			if line.strip().startswith('"'+key):
+				missing_cfg = missing_cfg + '\n' + line
+		missing_cfg = missing_cfg + '\n'
+
+if missing_cfg != None: 
+	log.critical( missing_cfg)
+	quit()
+	
+try:
+	if   cfg['log_level'] == "CRITICAL": log.setLevel(logging.CRITICAL)
+	elif cfg['log_level'] == "ERROR":	 log.setLevel(logging.ERROR)
+	elif cfg['log_level'] == "WARN": 	 log.setLevel(logging.WARN)
+	elif cfg['log_level'] == "INFO": 	 log.setLevel(logging.INFO)
+	elif cfg['log_level'] == "DEBUG": 	 log.setLevel(logging.DEBUG)
+	dbdir = str(cfg['dbdir'])
+	sleep_seconds = int(cfg['sleep_seconds'])
+except Exception, e:
+	log.exception("Error reading SyncIpy.cfg config settings: " + str(e))
+
+	
 #OPEN SQL
 conn = sqlite3.connect(os.path.join(dbdir,'SyncIpy.db'))
 c = conn.cursor()
 c2 = conn.cursor()
+
 
 #TABLE GENERATION AND UPDATE FUNCTIONS
 def gen_tables():
@@ -104,8 +128,8 @@ def gen_tables():
 			j = json.load(open(config_f))
 		except Exception, e: 
 			j = {'TYPE':'ConfigError', 'ENABLED':False}
-			print config_f + " was unable to be parsed.  Please review the config file for accuracy."
-
+			log.critical( config_f + " was unable to be parsed.  Please review the config file for accuracy.")
+			log.exception(str(e))
 
 		c.execute('INSERT OR IGNORE INTO PUBLISHERS (FILE) VALUES(?)',[config_f])
 		c.execute('UPDATE PUBLISHERS SET TYPE=?, ENABLED=?, CONFIG=? WHERE FILE=?',[j['TYPE'],j['ENABLED'],json.dumps(j),config_f])
@@ -173,7 +197,7 @@ def read_exifjson():
 		c.execute('UPDATE OR IGNORE PHOTOS SET STATUS="RM" WHERE PATH=? AND FILE=?',[i["Directory"],i["FileName"]])
 		
 		if 'Error' in i:
-			print i["FileName"] + ":" + "exiftool reported error" + i['Error']
+			log.error( i["FileName"] + ":" + "exiftool reported error" + i['Error'])
 			prehash = 'ERROR:'+pj
 			sts='ER'
 		elif 'OriginalDocumentID' in i:
@@ -181,27 +205,26 @@ def read_exifjson():
 				prehash=i["OriginalDocumentID"]+":"+pj
 				
 			except Exception, e: 
-				print i["FileName"]
-				print '{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe())) + str(e)
+				log.exception( i["FileName"] + ": "  + str(e))
 		else:
 			print i["FileName"] + ":" + "no OriginalDocumentID tag present.  Using NONE" 
 			prehash = 'NONE:'+pj
 		id = str(hashlib.sha256(prehash).hexdigest()) 
 		c.execute('REPLACE INTO PHOTOS (PK, PATH, FILE, STATUS, MDTTM, EXIF) VALUES (?,?,?,?,?,?)',[id,i['Directory'],i['FileName'],sts,dt,json.dumps(i)])
-#		print '{0.filename}-L{0.lineno}:'.format(inspect.getframeinfo(inspect.currentframe()))
+		log.info( i["FileName"] + ": Replacing Entry in DB Table Photos")
 		if sts == 'OK':
 			for pub in pubs:
 				PBT = "PB"+str(pub)
 				if c.execute('SELECT COUNT(*) FROM sqlite_master where type="table" and name="'+ PBT +'"').fetchone()[0] and pj.startswith(pub_dir[PBT]):
 					c.execute('UPDATE OR IGNORE '+PBT+' SET STATUS="XO" WHERE PK=?',[id])
 					c.execute('INSERT OR IGNORE INTO '+PBT+' (PK,SK,STATUS) VALUES (?,?,?)',[id,"TEMPSK_"+id,"NW"])
-
+					log.info( i["FileName"] + ": Updating Entry in DB Table " + PBT)
 	conn.commit()
 	return
 
 def run_pubs():
 	global cur_pub
-	if verbose > 4: 	print c.execute('SELECT COUNT(PK),STATUS from PHOTOS GROUP BY STATUS').fetchall()
+	log.info("Current Photo Status in Photos DB Table: "+str(c.execute('SELECT COUNT(PK),STATUS from PHOTOS GROUP BY STATUS').fetchall()))
 	for pub in pubs:
 		cur_pub = None
 		if halt == 1: return 
@@ -216,7 +239,7 @@ def run_pubs():
 		try:
 			for plugin in plugins:
 				if cfg['TYPE'] == plugin[0]:
-					cur_pub = globals()[plugin[1]](pub,dbdir,verbose)
+					cur_pub = globals()[plugin[1]](pub,dbdir)
 		except Exception, e:
 			print e
 		if cur_pub == None:
@@ -227,8 +250,8 @@ def run_pubs():
 		#conn = sqlite3.connect(os.path.join(dbdir,'SyncIpy.db'))
 		n2 = datetime.now()
 		n2 = n2.replace(microsecond = 0)
-		if verbose > 4: print PBT +"@"+ str(n2) + ":" +" Elapsed: "+ str((n2 - n1))+ ":"+ str(c.execute('SELECT COUNT(PK), STATUS FROM '+PBT+' GROUP BY STATUS').fetchall())
-#		print PBT +" Elapsed: "+ str((n2 - n1) - timedelta(microseconds=(n2 - n1).microseconds))
+		log.info( PBT + ":" +" Elapsed: "+ str((n2 - n1))+ ":"+ str(c.execute('SELECT COUNT(PK), STATUS FROM '+PBT+' GROUP BY STATUS').fetchall()))
+
 
 
 def sighandler(s1,s2):
@@ -236,14 +259,10 @@ def sighandler(s1,s2):
 	global cur_pub
 
 	if s1 < 16:
-		print "Received Signal " + str(s1) + str(s2)
+		log.info( "Received Signal " + str(s1) + "["+str(s2)+"]")
 		if cur_pub != None:
 			cur_pub.halt = 1
 		halt = 1
-
-
-
-
 
 
 # Main Executable Starts Here
@@ -252,9 +271,9 @@ for i in [x for x in dir(signal) if x.startswith("SIG")]:
 	try:
 		signum = getattr(signal,i)
 		signal.signal(signum,sighandler)
-		if verbose > 4: print('Signal Handler Registered for ' + i)
+		log.debug('Signal Handler Registered for ' + i)
 	except Exception, e:
-		if verbose > 4: print('Signal Handler Not Registered for ' + i)
+		log.debug('Signal Handler Not Registered for ' + i)
 	
 
 

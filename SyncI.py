@@ -14,11 +14,15 @@ plugins = 	[
 cfgdir = os.path.join(os.getenv('HOME'),".SyncIpy")
 dbdir = os.path.join(os.getenv('HOME'),".SyncIpy")
 sleep_seconds = 60
+fs_dirty_until = sys.maxint -1
+pub_cfg = {}
 
 pubs = []
 halt = 0
 cur_pub = None
 cfg = {}
+pubs_clean = False
+
 
 #Init Log
 formatter = logging.Formatter(fmt='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
@@ -33,6 +37,9 @@ default_config=''' {
 
 	"log_level": "Verbosity of log level output.  Choose from: CRITICAL, ERROR, WARNING, INFO, DEBUG",
 	"log_level": "CRITICAL",
+
+	"watchdog": "Use Watchdog Python Module to minimize scanning of fs for changes",
+	"watchdog": "False",
 
 	"sleep_seconds": "Delay from end of last sync to start of next sync in seconds",
 	"sleep_seconds": '''+str(sleep_seconds)+'''
@@ -90,19 +97,67 @@ try:
 	elif cfg['log_level'] == "DEBUG": 	 log.setLevel(logging.DEBUG)
 	dbdir = str(cfg['dbdir'])
 	sleep_seconds = int(cfg['sleep_seconds'])
+	fs_dirty_until = (int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds())+ sleep_seconds + sleep_seconds)
+
 except Exception, e:
 	log.exception("Error reading SyncIpy.cfg config settings: " + str(e))
 
-	
 #OPEN SQL
 conn = sqlite3.connect(os.path.join(dbdir,'SyncIpy.db'))
 c = conn.cursor()
 c2 = conn.cursor()
 
+observer = None
+
+
+#INIT Watchdog
+FSwatch_base = object
+
+if cfg['watchdog'] == "True":
+	from watchdog.events import FileSystemEventHandler
+	FSwatch_base = FileSystemEventHandler
+
+
+class FSwatch(FSwatch_base):
+
+	def on_any_event(self, event):
+		global fs_dirty_until
+		log.debug('FS Event Registered. Setting FS Dirty Flag.')
+		fs_dirty_until = (int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds())+ sleep_seconds + sleep_seconds)
+
+def watchdog_start():
+	global observer
+
+	try:
+		import watchdog
+		from watchdog.observers import Observer
+		event_handler = FSwatch()
+		observer = Observer()
+		for p in c.execute('SELECT CONFIG FROM PUBLISHERS WHERE ENABLED = ?',[True]):
+			observer.schedule(event_handler, path=json.loads(p[0])['PATH'], recursive=True)
+		observer.schedule(event_handler, path='.', recursive=False)
+		observer.start()
+
+	except Exception,e:
+		observer = None
+		log.exception("Watchdog Module Failed to Start: " + str(e) )
+
+
+def watchdog_stop():
+	global observer
+	if observer != None:
+		try:
+			observer.stop()
+			observer.join()
+		except Exception,e:
+			log.exception("Watchdog Module Failed to Start: " + str(e) )
+	
+
+
 
 #TABLE GENERATION AND UPDATE FUNCTIONS
 def gen_tables():
-
+	
 	pubs[:] = []
 	c.execute('CREATE TABLE IF NOT EXISTS PHOTOS ( ' +
 			  '"ID" INTEGER PRIMARY KEY AUTOINCREMENT,' +
@@ -135,14 +190,22 @@ def gen_tables():
 		c.execute('UPDATE PUBLISHERS SET TYPE=?, ENABLED=?, CONFIG=? WHERE FILE=?',[j['TYPE'],j['ENABLED'],json.dumps(j),config_f])
 		if j['ENABLED'] == True: 	  
 			tID = c.execute('SELECT ID FROM PUBLISHERS WHERE FILE=?',[config_f]).fetchone()[0]
-			pubs.append(tID)
-			
+			tCFG = {'ID':tID,'TYPE':j['TYPE'],'ENABLED':j['ENABLED'],'CONFIG':json.dumps(j)}
+			pubs.append(tCFG)
+			#pubs.append(tID)
 	conn.commit()
 
-
-
 #DIR SCANNING FUNCTIONS
-def read_exifjson():
+def run_filepoll():
+	global pubs_clean
+	
+ 
+	#Check if poll is required else return
+	if fs_dirty_until  < int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds()) and observer != None:
+
+		log.debug('FS Dirty flag not Set.  Skipping Poll')
+		return
+
 	j = []
 	pub_dir = {}
 	modified_images = set()
@@ -154,15 +217,17 @@ def read_exifjson():
 		mdttms[os.path.join(photo[0],photo[1])]=photo[2]
 		missing_images.add(os.path.join(photo[0],photo[1]))
 
-	c.execute('SELECT ID,CONFIG FROM PUBLISHERS WHERE ENABLED=1')
-	for pub in c:
-		PBT = "PB" + str(pub[0])
-		cfg = json.loads(pub[1])
+	
+	for pub in pubs:
+
+		
+		PBT = "PB" + str(pub['ID'])
+		cfg = json.loads(pub['CONFIG'])
 		dir = cfg['PATH']
 		pub_dir[PBT]=dir
 		ext = tuple(cfg['EXT'].split("|"))
 		
-		utcnowdttm = int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds()-30)
+		utcnowdttm = int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds())-int(.5*sleep_seconds)
 		
 		for root, dirs, files in os.walk(dir):
 			files = [f for f in files if not f[0] == '.']
@@ -177,10 +242,19 @@ def read_exifjson():
 				if (pj not in mdttms or int(mdttms[pj]) != int(mdttm)) and mdttm < utcnowdttm:
 					modified_images.add(pj)
 					
-
 	for i in missing_images:
 		(missing_path, missing_file) = os.path.split(i)
-		c.execute('UPDATE PHOTOS SET STATUS="RM" WHERE FILE=? AND PATH=?',[missing_file,missing_path])
+
+		pk = c.execute('SELECT PK FROM PHOTOS WHERE FILE=? AND PATH=?',[missing_file,missing_path]).fetchone()[0]
+		
+		for pub in pubs:
+			if c.execute('SELECT COUNT(PK) FROM PB' + str(pub['ID']) + ' WHERE PK=?',[pk]).fetchone()[0] != 0:
+				c.execute('UPDATE PHOTOS SET STATUS="RM" WHERE FILE=? AND PATH=?',[missing_file,missing_path])
+				log.info(missing_file + ": Setting RM Status in PHOTOS DB Table")
+				break
+		else:
+			log.info(missing_file + ": Deleting Cleaned Up RM Entry From Photos DB Table")
+			c.execute('DELETE FROM PHOTOS WHERE pk=?',[pk])
 					
 	if len(modified_images) > 0:
 		cmd = ['exiftool','-fast','-j']
@@ -207,30 +281,34 @@ def read_exifjson():
 			except Exception, e: 
 				log.exception( i["FileName"] + ": "  + str(e))
 		else:
-			print i["FileName"] + ":" + "no OriginalDocumentID tag present.  Using NONE" 
+			log.warn(i["FileName"] + ": no OriginalDocumentID tag present.  Using NONE")
 			prehash = 'NONE:'+pj
 		id = str(hashlib.sha256(prehash).hexdigest()) 
 		c.execute('REPLACE INTO PHOTOS (PK, PATH, FILE, STATUS, MDTTM, EXIF) VALUES (?,?,?,?,?,?)',[id,i['Directory'],i['FileName'],sts,dt,json.dumps(i)])
 		log.info( i["FileName"] + ": Replacing Entry in DB Table Photos")
 		if sts == 'OK':
 			for pub in pubs:
-				PBT = "PB"+str(pub)
+				PBT = "PB"+str(pub['ID'])
 				if c.execute('SELECT COUNT(*) FROM sqlite_master where type="table" and name="'+ PBT +'"').fetchone()[0] and pj.startswith(pub_dir[PBT]):
 					c.execute('UPDATE OR IGNORE '+PBT+' SET STATUS="XO" WHERE PK=?',[id])
 					c.execute('INSERT OR IGNORE INTO '+PBT+' (PK,SK,STATUS) VALUES (?,?,?)',[id,"TEMPSK_"+id,"NW"])
 					log.info( i["FileName"] + ": Updating Entry in DB Table " + PBT)
 	conn.commit()
+	
+	pubs_clean = len(modified_images) == 0 and len(missing_images) == 0 and pubs_clean
 	return
 
 def run_pubs():
+	global pubs_clean
 	global cur_pub
+	pubs_clean = True
+
 	log.info("Current Photo Status in Photos DB Table: "+str(c.execute('SELECT COUNT(PK),STATUS from PHOTOS GROUP BY STATUS').fetchall()))
 	for pub in pubs:
 		cur_pub = None
 		if halt == 1: return 
-		PBT= "PB"+str(pub)
-		p = (c.execute('SELECT CONFIG,FILE FROM PUBLISHERS WHERE ID=?',[pub]).fetchall()[0])
-		cfg = json.loads(p[0])
+		PBT= "PB"+str(pub['ID'])
+		cfg = json.loads(pub['CONFIG'])
 		n1 = datetime.now()
 		n1 = n1.replace(microsecond = 0)
 		sys.stdout.flush()
@@ -239,11 +317,11 @@ def run_pubs():
 		try:
 			for plugin in plugins:
 				if cfg['TYPE'] == plugin[0]:
-					cur_pub = globals()[plugin[1]](pub,dbdir)
+					cur_pub = globals()[plugin[1]](pub['ID'],dbdir)
 		except Exception, e:
-			print e
+			log.exception(str(e))
 		if cur_pub == None:
-			"Plugin Type "+ cfg['TYPE']+" Invalid in Config " + p[1]
+			log.error("Plugin Type "+ cfg['TYPE']+" Invalid in Config " + p[1])
 		else:
 			cur_pub.sync()
 			cur_pub = None
@@ -252,6 +330,7 @@ def run_pubs():
 		n2 = n2.replace(microsecond = 0)
 		log.info( PBT + ":" +" Elapsed: "+ str((n2 - n1))+ ":"+ str(c.execute('SELECT COUNT(PK), STATUS FROM '+PBT+' GROUP BY STATUS').fetchall()))
 
+		pubs_clean = c.execute('SELECT COUNT(ID) FROM PB2 WHERE STATUS!="OK"').fetchone()[0] == 0 and pubs_clean 
 
 
 def sighandler(s1,s2):
@@ -259,14 +338,12 @@ def sighandler(s1,s2):
 	global cur_pub
 
 	if s1 < 16:
-		log.info( "Received Signal " + str(s1) + "["+str(s2)+"]")
+		log.warn( "Received Signal " + str(s1) + "["+str(s2)+"]")
 		if cur_pub != None:
 			cur_pub.halt = 1
 		halt = 1
 
-
 # Main Executable Starts Here
-
 for i in [x for x in dir(signal) if x.startswith("SIG")]:
 	try:
 		signum = getattr(signal,i)
@@ -274,18 +351,26 @@ for i in [x for x in dir(signal) if x.startswith("SIG")]:
 		log.debug('Signal Handler Registered for ' + i)
 	except Exception, e:
 		log.debug('Signal Handler Not Registered for ' + i)
-	
-
 
 #MAIN LOOP
 gen_tables()
+if cfg['watchdog'] == "True":
+	watchdog_start()
+
 while halt == 0 and len(pubs) > 0:
-	gen_tables()
+	fs_clean = False
 	if halt == 1: quit()
-	read_exifjson()
+	run_filepoll()
 	if halt == 1: quit()
-	run_pubs()
+	if pubs_clean == True:
+		log.debug('Pubs still clean. Skipping Run')
+	else:
+		run_pubs()
 	if halt == 1: quit()
+
 	time.sleep(sleep_seconds)
-	
+
 conn.close()
+
+if cfg['watchdog'] == "True":
+	watchdog_stop()

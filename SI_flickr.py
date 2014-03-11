@@ -209,7 +209,7 @@ class SI_flickr(object):
 		if not 'file' in kwargs or not 'path' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): kwargs = extend_kwargs(**kwargs)
 		if not 'file' in kwargs or not 'path' in kwargs or (not 'sk' in kwargs and not 'fp' in kwargs): return -1
 		
-		self.logging.info(file)
+		self.log.info(kwargs['file'] + ": Replacing on Flickr")
 		rv = self.delete_photo(**kwargs)
 		if rv < 1: 
 			return rv

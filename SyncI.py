@@ -1,8 +1,7 @@
 #!/usr/bin/python
-import sqlite3, glob, json, sys, inspect, subprocess, hashlib, time, os, signal
+import sqlite3, glob, json, sys, inspect, subprocess, hashlib, time, os, signal,logging, logging.config
 from datetime import datetime,timedelta
 from SI_flickr import *
-import logging
 
 
 #GLOBALS
@@ -24,12 +23,44 @@ cfg = {}
 pubs_clean = False
 
 
-#Init Log
-formatter = logging.Formatter(fmt='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
-handler = logging.StreamHandler()
-handler.setFormatter(formatter)
-log = logging.getLogger('SyncIpy')
-log.addHandler(handler)
+if len(sys.argv) == 2:
+	cfgdir = sys.argv[0]
+elif len(sys.argv) > 2:
+	print "Too many arguments provided.  A single path where config files can be found is the only argument"
+	quit()
+
+
+#Init Config Log
+default_logging_conf='''
+[loggers]
+keys=root,SyncIpy
+
+[handlers]
+keys=console
+
+[formatters]
+keys=screen
+
+[logger_root]
+level=NOTSET
+handlers=console
+
+[logger_SyncIpy]
+level=NOTSET
+qualname=SyncIpy
+propagate=0
+handlers=console
+
+[handler_console]
+class=StreamHandler
+level=ERROR
+formatter=screen
+args=(sys.stdout,)
+
+[formatter_screen]
+format=%(asctime)s %(levelname)-7s %(module)-10s - %(message)-60s (%(filename)s:%(lineno)d)
+datefmt=%Y-%m-%d %H:%M:%S
+'''
 
 default_config=''' {
 	"dbdir": "Directory for database to be stored",
@@ -45,35 +76,81 @@ default_config=''' {
 	"sleep_seconds": '''+str(sleep_seconds)+'''
  }'''
 
-if len(sys.argv) == 2:
-	cfgdir = sys.argv[0]
-elif len(sys.argv) > 2:
-	log.critical("Too many arguments provided.  A single path where config files can be found is the only argument")
-	quit()
+pj = os.path.join(cfgdir,'logging.conf')
+formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-7s %(module)-10s - %(message)-60s (%(filename)s:%(lineno)d)',datefmt="")
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
 
-#Create Config Dir and Read Config if Available.  Add example config files to directory.
+try:
+	if os.path.isfile(pj):
+		logging.config.fileConfig(pj)
+		log = logging.getLogger('SyncIpy')
+		log.info('Logging Started Using ' + pj)
+	else:
+		log = logging.getLogger('SyncIpy')
+		log.setLevel(logging.WARNING)
+		log.addHandler(handler)
+		log.error('Logging started using default params. Check logging.conf')
+
+except Exception, e:
+	log = logging.getLogger('SyncIpy')
+	log.setLevel(logging.WARNING)
+	log.addHandler(handler)
+	log.error('Logging started using default params. Check logging.conf')
+	log.exception(e)
+
+
+
+
+#Create Config Dir 
 if not os.path.isdir(cfgdir):
 	try:
 		log.info("Config Dir " + cfgdir + "does not exists.  Creating directory default config and sample pub configs.")
 		os.mkdir(cfgdir)
-		f = open(os.path.join(cfgdir,"SyncIpy.cfg.sample"),"w")
-		f.write(default_config)
-		f.close()
-		for plugin in plugins:
-			f = open(os.path.join(cfgdir,plugin[0]+".pub.sample"),"w")
-			f.write(plugin[2])
-			f.close()
 	except Exception, e:
 		log.critical("Config Dir " + cfgdir + "does not exists and user does not have sufficiant permission to create it")
 		log.exception(str(e))
 		quit()
-else:
+
+#Add example config files to directory.
+if os.path.isdir(cfgdir):
+	try:
+		pj = os.path.join(cfgdir,"SyncIpy.cfg.sample")
+		if not os.path.isfile(pj):
+			log.warn("Creating " + pj)
+			f = open(pj,"w")
+			f.write(default_config)
+			f.close()
+
+		pj = os.path.join(cfgdir,"logging.conf")
+		if not os.path.isfile(pj):
+			log.warn("Creating " + pj)
+			f = open(pj,"w")
+			f.write(default_logging_conf)
+			f.close()
+
+		for plugin in plugins:
+			pj = os.path.join(cfgdir,plugin[0]+".pub.sample")
+			if not os.path.isfile(pj):
+				log.warn("Creating " + pj)
+				f = open(pj,"w")
+				f.write(plugin[2])
+				f.close()
+
+	except:
+		log.error('Problem Creating Missing Config File Samples')
+		log.exception()
+
+if os.path.isfile(os.path.join(cfgdir,'SyncIpy.cfg')):
 	try:
 		cfg = json.load(open(os.path.join(cfgdir,'SyncIpy.cfg')))
 	except Exception, e:
 		log.critical("Problems Reading " + os.path.join(cfgdir,'SyncIpy.cfg') +"\nPlease ensure file is created and is properly formatted" )
 		log.exception(str(e))
 		quit()
+else:
+	log.critical("SyncIpy.cfg Missing In " + cfgdir)
+	quit()
 
 missing_cfg = None
 for key in json.loads(default_config).keys():
@@ -90,11 +167,6 @@ if missing_cfg != None:
 	quit()
 	
 try:
-	if   cfg['log_level'] == "CRITICAL": log.setLevel(logging.CRITICAL)
-	elif cfg['log_level'] == "ERROR":	 log.setLevel(logging.ERROR)
-	elif cfg['log_level'] == "WARN": 	 log.setLevel(logging.WARN)
-	elif cfg['log_level'] == "INFO": 	 log.setLevel(logging.INFO)
-	elif cfg['log_level'] == "DEBUG": 	 log.setLevel(logging.DEBUG)
 	dbdir = str(cfg['dbdir'])
 	sleep_seconds = int(cfg['sleep_seconds'])
 	fs_dirty_until = (int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds())+ sleep_seconds + sleep_seconds)
@@ -198,13 +270,15 @@ def gen_tables():
 #DIR SCANNING FUNCTIONS
 def run_filepoll():
 	global pubs_clean
+	global fs_dirty_until
 	
- 
 	#Check if poll is required else return
-	if fs_dirty_until  < int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds()) and observer != None:
-
-		log.debug('FS Dirty flag not Set.  Skipping Poll')
+	if fs_dirty_until == None:
+		log.debug('FS Dirty flag not Set.  Skipping poll')
 		return
+	else:
+		if observer != None and fs_dirty_until < int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds()):
+			fs_dirty_until = None
 
 	j = []
 	pub_dir = {}
@@ -259,7 +333,9 @@ def run_filepoll():
 	if len(modified_images) > 0:
 		cmd = ['exiftool','-fast','-j']
 		cmd.extend(modified_images)
-		out = subprocess.check_output(cmd)
+		dn = open(os.devnull,"w")
+		out = subprocess.check_output(cmd,stderr=dn)
+		dn.close()
 		j = json.loads(out)
 
 	for i in j:

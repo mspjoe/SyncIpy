@@ -78,7 +78,7 @@ class SI_flickr(object):
 
 		try:
 			flickr_api.set_auth_handler(cfg_file+'.oa')
-			self.log.info('Loaded oauth for flickr on'+str(PBT))
+			self.log.info('Loaded oauth for flickr on '+str(PBT))
 		except:
 
 			try:
@@ -169,7 +169,8 @@ class SI_flickr(object):
 	def upload_photo(self,**kwargs):
 		if not 'path' in kwargs or not 'file' in kwargs: kwargs = self.extend_kwargs(**kwargs)
 		if not 'path' in kwargs or not 'file' in kwargs: return -1
-		try:				
+		try:
+			self.log.info(self.current_file+": Uploading To Flickr")
 			fp = flickr_api.upload(photo_file = os.path.join(kwargs['path'],kwargs['file']))
 			return fp['id']
 		except Exception, e: 

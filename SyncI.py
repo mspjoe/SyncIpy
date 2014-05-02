@@ -66,9 +66,6 @@ default_config=''' {
 	"dbdir": "Directory for database to be stored",
 	"dbdir": "'''+str(dbdir)+'''",
 
-	"log_level": "Verbosity of log level output.  Choose from: CRITICAL, ERROR, WARNING, INFO, DEBUG",
-	"log_level": "CRITICAL",
-
 	"watchdog": "Use Watchdog Python Module to minimize scanning of fs for changes",
 	"watchdog": "False",
 
@@ -206,8 +203,8 @@ def watchdog_start():
 		event_handler = FSwatch()
 		observer = Observer()
 		for p in c.execute('SELECT CONFIG FROM PUBLISHERS WHERE ENABLED = ?',[True]):
+			log.debug('Starting Observer On ' + json.loads(p[0])['PATH'])
 			observer.schedule(event_handler, path=json.loads(p[0])['PATH'], recursive=True)
-		observer.schedule(event_handler, path='.', recursive=False)
 		observer.start()
 
 	except Exception,e:
@@ -278,6 +275,7 @@ def run_filepoll():
 		return
 	else:
 		if observer != None and fs_dirty_until < int((datetime.utcnow()-datetime(1970, 1, 1)).total_seconds()):
+			log.info('Clearing FS Dirty flag')
 			fs_dirty_until = None
 
 	j = []

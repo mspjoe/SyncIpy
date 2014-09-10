@@ -24,7 +24,7 @@ pubs_clean = False
 
 
 if len(sys.argv) == 2:
-	cfgdir = sys.argv[0]
+	cfgdir = sys.argv[1]
 elif len(sys.argv) > 2:
 	print "Too many arguments provided.  A single path where config files can be found is the only argument"
 	quit()
@@ -175,7 +175,17 @@ except Exception, e:
 conn = sqlite3.connect(os.path.join(dbdir,'SyncIpy.db'))
 c = conn.cursor()
 c2 = conn.cursor()
-
+if c.execute('pragma integrity_check;').fetchall() == [(u'ok',)]:
+	log.info('SQLITE3 Database Integrity Check Passed')
+else:
+	log.error('SQLITE Database Integrity Check Failed')
+	log.error('Please Correct Prior to Re-Launching')
+	log.error('The following steps will extract and import your data into a new DB using the SQLITE tools:')
+	log.error('cd ' + dbdir)
+	log.error('mv SyncIpy.db SyncIpy.db.copy')
+	log.error('echo .dump | sqlite3.exe SyncIpy.db.copy > SyncIpy.db.sql')
+	log.error('sqlite3 -init SyncIpy.db.sql SyncIpy.db')
+	quit()
 observer = None
 
 
@@ -404,7 +414,7 @@ def run_pubs():
 		n2 = n2.replace(microsecond = 0)
 		log.info( PBT + ":" +" Elapsed: "+ str((n2 - n1))+ ":"+ str(c.execute('SELECT COUNT(PK), STATUS FROM '+PBT+' GROUP BY STATUS').fetchall()))
 
-		pubs_clean = c.execute('SELECT COUNT(ID) FROM PB2 WHERE STATUS!="OK"').fetchone()[0] == 0 and pubs_clean 
+		pubs_clean = c.execute('SELECT COUNT(ID) FROM '+PBT+' WHERE STATUS!="OK"').fetchone()[0] == 0 and pubs_clean 
 
 
 def sighandler(s1,s2):

@@ -2,11 +2,12 @@
 import sqlite3, glob, json, sys, inspect, subprocess, hashlib, time, os, signal,logging, logging.config
 from datetime import datetime,timedelta
 from SI_flickr import *
-
+from SI_google import *
 
 #GLOBALS
 plugins = 	[
-				["flickr","SI_flickr",SI_flickr_cfg()]
+				["flickr","SI_flickr",SI_flickr_cfg()],
+				["google","SI_google",SI_google_cfg()]
 	    	]
 			
 #The following is the default config diretory.  If passed from the 
@@ -36,7 +37,7 @@ default_logging_conf='''
 keys=root,SyncIpy
 
 [handlers]
-keys=console
+keys=console,file
 
 [formatters]
 keys=screen
@@ -56,6 +57,12 @@ class=StreamHandler
 level=ERROR
 formatter=screen
 args=(sys.stdout,)
+
+[handler_file]
+class=FileHandler
+level=INFO
+formatter=default
+args=('''+"'"+str(dbdir)+"/SyncIpy.log'"+''', 'w')
 
 [formatter_screen]
 format=%(asctime)s %(levelname)-7s %(module)-10s - %(message)-60s (%(filename)s:%(lineno)d)

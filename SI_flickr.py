@@ -1,7 +1,7 @@
 #!/usr/bin/python
-import sqlite3, glob, json, sys, re, inspect, flickr_api, subprocess,os
+import sqlite3, glob, json, sys, re, inspect, flickr_api, subprocess,os,logging
 from datetime import datetime
-import logging
+
 
 class SI_flickr(object):
 	
@@ -241,7 +241,7 @@ class SI_flickr(object):
 			self.log.info(self.current_file+": Setting Date to " + str(udttm))
 
 		except Exception, e:
-			self.log.exeception(self.current_file + ': ' +str(e))
+			self.log.exception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -266,7 +266,7 @@ class SI_flickr(object):
 				fp = flickr_api.Photo(id=kwargs['sk'])
 			fp.setMeta(**arg_list)
 		except Exception, e:
-			self.log.exeception(self.current_file + ': ' +str(e))
+			self.log.exception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -285,7 +285,7 @@ class SI_flickr(object):
 				fp = flickr_api.Photo(id=kwargs['sk'])
 			fp.setPerms(is_public=self.cfg['is_public'],is_friend=self.cfg['is_friend'],is_family=self.cfg['is_family'],perm_comment=self.cfg['perm_comment'],perm_addmeta=self.cfg['perm_addmeta'])
 		except Exception, e:
-			self.log.exeception(self.current_file + ': ' +str(e))
+			self.log.exception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -305,7 +305,7 @@ class SI_flickr(object):
 
 			fp.setSafetyLevel(hidden=self.cfg['hidden'],safety_level=self.cfg['safety_level'])
 		except Exception, e:
-			self.log.exeception(self.current_file + ': ' +str(e))
+			self.log.exception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 
@@ -339,7 +339,7 @@ class SI_flickr(object):
 				fp = flickr_api.Photo(id=kwargs['sk'])
 			fp.setTags(tags)
 		except Exception, e:
-			self.log.exeception(self.current_file + ': ' +str(e))
+			self.log.exception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 	
@@ -388,7 +388,7 @@ class SI_flickr(object):
 						try:
 							ppps.removePhoto(fp)
 						except Exception, e:
-							self.log.exeception(self.current_file + ': ' +str(e))
+							self.log.exception(self.current_file + ': ' +str(e))
 							return 0
 
 			for dps in desired_ps:
@@ -409,10 +409,10 @@ class SI_flickr(object):
 							psk.addPhoto(photo = fp)
 							self.log.info(self.current_file + ': Adding to Photoset ' + str(dps))
 						except Exception, e:
-							self.log.exeception(self.current_file + ': ' +str(e))
+							self.log.exception(self.current_file + ': ' +str(e))
 							return 0
 		except Exception, e:
-			self.log.exeception(self.current_file + ': ' +str(e))
+			self.log.exception(self.current_file + ': ' +str(e))
 			return 0
 		return 1
 

@@ -40,7 +40,7 @@ keys=root,SyncIpy
 keys=console,file
 
 [formatters]
-keys=screen
+keys=default
 
 [logger_root]
 level=NOTSET
@@ -55,7 +55,7 @@ handlers=console
 [handler_console]
 class=StreamHandler
 level=ERROR
-formatter=screen
+formatter=default
 args=(sys.stdout,)
 
 [handler_file]
@@ -64,12 +64,13 @@ level=INFO
 formatter=default
 args=('''+"'"+str(dbdir)+"/SyncIpy.log'"+''', 'w')
 
-[formatter_screen]
+[formatter_default]
 format=%(asctime)s %(levelname)-7s %(module)-10s - %(message)-60s (%(filename)s:%(lineno)d)
 datefmt=%Y-%m-%d %H:%M:%S
 '''
 
-default_config=''' {
+default_config=''' 
+{
 	"dbdir": "Directory for database to be stored",
 	"dbdir": "'''+str(dbdir)+'''",
 
@@ -78,7 +79,7 @@ default_config=''' {
 
 	"sleep_seconds": "Delay from end of last sync to start of next sync in seconds",
 	"sleep_seconds": '''+str(sleep_seconds)+'''
- }'''
+}'''
 
 pj = os.path.join(cfgdir,'logging.conf')
 formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-7s %(module)-10s - %(message)-60s (%(filename)s:%(lineno)d)',datefmt="")

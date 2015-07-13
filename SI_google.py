@@ -1,7 +1,14 @@
 #!/usr/bin/python
-import yaml, gdata.photos.service, gdata.media, sqlite3, glob, json, sys, re, inspect, subprocess,os,logging,time, atom, atom.service
+import gdata, gdata.photos.service, gdata.gauth, gdata.media, sqlite3, glob, json, sys, re, inspect, subprocess,os,logging,time, atom, atom.service
+from oauth2client.client import flow_from_clientsecrets
+from oauth2client.file import Storage
+from oauth2client.tools import run
+from oauth2client import tools
 from datetime import datetime
 from PIL import Image
+import httplib2
+import gdata.data
+
 
 class SI_google(object):
 		
@@ -47,6 +54,8 @@ class SI_google(object):
 			self.pub = publisher_id
 
 		self.log = logging.getLogger('SyncIpy')
+
+
 		PBT = "PB"+str(self.pub)
 		self.halt = 0
 		self.albums = None
@@ -103,56 +112,57 @@ class SI_google(object):
 		if self.halt == 1: return
 
 		gdata.photos.service.SUPPORTED_UPLOAD_TYPES = ('bmp', 'jpeg', 'jpg', 'gif', 'png', 'mov', 'mpg', 'mpeg')
-		self.pws = gdata.photos.service.PhotosService()
-		self.pws.ssl = False
-		self.pws.email = "account@gmail.com"
+		#self.pws = gdata.photos.service.PhotosService()
 
-		if (not os.path.isfile(cfg_file + '.oa')):
-			with open(cfg_file + '.oa', "w") as oa_file:
-				yaml.dump({"account": ["account@gmail.com", None]}, oa_file)
 
-		try:
-			with open(cfg_file + '.oa', "r") as oa_file:
-				config = yaml.load(oa_file)
-				user_account = config['account'][0]
-				token = config['account'][1]
-				self.pws.email = user_account
 
-			self.pws.SetOAuthToken(token)
-			self.pws.GetUserFeed(kind='album', user='default', limit=1)
 
-		except Exception, e:
-			self.pws.SetOAuthInputParameters(gdata.auth.OAuthSignatureMethod.HMAC_SHA1, consumer_key='anonymous', consumer_secret='anonymous')
-			display_name = 'SyncIpy'
-			fetch_params = {'xoauth_displayname':display_name}
-			scopes = list(gdata.service.lookup_scopes('lh2'))
-		  
-			try:
-				request_token = self.pws.FetchOAuthRequestToken(scopes=scopes, extra_parameters=fetch_params)
-			except gdata.service.FetchingOAuthRequestTokenFailed, err:
-				self.log.exception( err[0]['body'].strip() + '; Request token retrieval failed!')
-				self.halt = 1
-		  
-			auth_params = {'hd': self.cfg['domain']}
-			auth_url = self.pws.GenerateOAuthAuthorizationURL(request_token=request_token, extra_params=auth_params)
-			message = 'Please log in and/or grant access via your browser at ' + auth_url + ' then hit enter.'
-			raw_input(message)
+		# How to use the OAuth 2.0 client is described here:
+		# https://developers.google.com/api-client-library/python/guide/aaa_oauth
+		USER_AGENT = ''
+		SCOPES = ['https://www.googleapis.com/auth/contacts.readonly','https://docs.google.com/feeds/']
+		print SCOPES
+		SCOPE=' '.join(SCOPES)
+		print "Scope"
+		print SCOPE
 
-			# This upgrades the token, and if successful, sets the access token
-			try:
-				self.pws.UpgradeToOAuthAccessToken(request_token)
-			except gdata.service.TokenUpgradeFailed, e:
-				self.log.exception('Token upgrade failed! Could not get OAuth access token.')
-				self.log.exception(str(e))
-				self.halt = 1
+		# client_secrets.json is downloaded from the API console:
+		# https://code.google.com/apis/console/#project:<PROJECT_ID>:access
+		# where <PROJECT_ID> is the ID of your project
+		 
+		flow = flow_from_clientsecrets(self.cfg['client_secret'],
+		                               scope=SCOPE,
+		                               redirect_uri='http://localhost')
+		 
+		storage = Storage(cfg_file + '.oa')
+		credentials = storage.get()
+
+
+		if credentials is None or credentials.invalid:
+			flags = tools.argparser.parse_args(args=[])
+			credentials = tools.run_flow(flow, storage, flags)
+
+		if credentials.access_token_expired:
+   			credentials.refresh(httplib2.Http())
+        
+		# Munge the data in the credentials into a gdata OAuth2Token
+		# This is based on information in this blog post:
+		# https://groups.google.com/forum/m/#!msg/google-apps-developer-blog/1pGRCivuSUI/3EAIioKp0-wJ
 		
-		if self.halt == 1: 
-			self.log.exception('Failed to request access')
-			return
-		
-		config['account'][1] = self.pws.current_token
-		with open(cfg_file + '.oa', "w") as oa_file:
-			yaml.dump(config, oa_file)
+
+		self.log.info("Monkey Patching Auth Token and authorizing client")
+
+		oauth2token = gdata.gauth.OAuth2Token(client_id=credentials.client_id,
+                                  client_secret=credentials.client_secret,
+                                  scope=SCOPE,
+                                  access_token=credentials.access_token,
+                                  refresh_token=credentials.refresh_token,
+                                  user_agent=USER_AGENT)
+		# Authorize it
+
+		self.pws = oauth2token.authorize(gdata.photos.service.PhotosService())
+
+
 		
    ### This function helps keep SQL calls out of many other functions
 	# It does so by returning all possible data for a photo based on a few different identifiers.
@@ -245,16 +255,16 @@ class SI_google(object):
 
 	def shrinkIfNeeded(self, path):
 		img = Image.open(path)
-		if max(img.size) > self.cfg['max_photo_size']:
-			self.log.info( "Shrinking " + path + " to " + str(self.cfg['max_photo_size']))
+		(w,h) = img.size
+
+		if  self.cfg['max_photo_dimension'] > 0 and max(img.size) > self.cfg['max_photo_dimension']:
+			self.log.info( "Shrinking " + path + " to " + str(self.cfg['max_photo_dimension']))
 			imagePath = os.path.join(self.cfg['temp_dir'], os.path.basename(path))
 		
-			img = Image.open(path)
-			(w,h) = img.size
 			if (w>h):
-				img2 = img.resize((self.cfg['max_photo_size'], (h*self.cfg['max_photo_size'])/w), Image.ANTIALIAS)
+				img2 = img.resize((self.cfg['max_photo_dimension'], (h*self.cfg['max_photo_dimension'])/w), Image.ANTIALIAS)
 			else:
-				img2 = img.resize(((w*self.cfg['max_photo_size'])/h, self.cfg['max_photo_size']), Image.ANTIALIAS)
+				img2 = img.resize(((w*self.cfg['max_photo_dimension'])/h, self.cfg['max_photo_dimension']), Image.ANTIALIAS)
 			img2.save(imagePath, 'JPEG', quality=99)
 			cmd = ['exiftool', '-TagsFromFile', path,'--Orientation', '--ImageSize', imagePath]
 			dn = open(os.devnull,"w")
@@ -262,6 +272,24 @@ class SI_google(object):
 			dn.close()
 			
 			return imagePath
+
+		if  self.cfg['max_photo_pixels'] > 0 and (w * h) > self.cfg['max_photo_pixels']:
+			self.log.info( "Shrinking " + path + " to " + str(self.cfg['max_photo_pixels']))
+			imagePath = os.path.join(self.cfg['temp_dir'], os.path.basename(path))
+			
+			scaler=((w**.5)*(h**.5))/(self.cfg['max_photo_pixels']**.5)
+
+			
+			img2 = img.resize(w//scaler, h//scaler, Image.ANTIALIAS)
+			img2.save(imagePath, 'JPEG', quality=99)
+			cmd = ['exiftool', '-TagsFromFile', path,'--Orientation', '--ImageSize', imagePath]
+			dn = open(os.devnull,"w")
+			out = subprocess.check_output(cmd,stderr=dn)
+			dn.close()
+			
+			return imagePath
+
+		
 		return path
 		
 	# Uploads os.path.join(path,file) to Google and returns google photo id. 
@@ -292,7 +320,7 @@ class SI_google(object):
 
 				# tested by cpbotha on 2013-05-24
 				# this limit still exists
-				if size > self.cfg['max_vid_bytes']:
+				if self.cfg['max_vid_bytes'] > 0 and size > self.cfg['max_vid_bytes']:
 					self.log.exception( "Video file too big to upload: " + str(size) + " > " + str(self.cfg['max_vid_bytes']))
 					return 0
 				imagePath = localPath
@@ -516,8 +544,14 @@ class SI_google(object):
 			if self.halt == 1: return
 			c2.execute('SELECT '+PBT+'.PK,'+PBT+'.SK, '+PBT+'.STATUS, '+PBT+'.UDTTM, PHOTOS.PATH, PHOTOS.FILE ,PHOTOS.EXIF,PHOTOS.MDTTM,'+PBT+'.SYNCED FROM '+PBT+ 
 					', PHOTOS WHERE PHOTOS.PK='+PBT+'.PK AND PHOTOS.PK=?',[tc[0]])
+			tph = c2.fetchone()
 			
-			pk, sk, status, udttm, path,file,raw_exif,mdttm,synced_raw = c2.fetchone()
+			if tph == None:
+				c2.execute('DELETE FROM '+PBT+' WHERE pk=?',[tc[0]])
+				self.conn.commit()
+				return				
+			else:			
+				pk, sk, status, udttm, path,file,raw_exif,mdttm,synced_raw = tph
 			
 			exif = json.loads(raw_exif)
 			self.current_file = str(file)
@@ -645,13 +679,22 @@ def SI_google_cfg():
 	"perm_comment":"who can add comments to the photo and it's notes. one of 0: the owner, 1: friends & family, 2: contacts, 3: everybody",
 	"perm_comment":0,
 
-	"max_photo_size":"Set to max photo size to upload.",
-	"max_photo_size":2048,
+	"max_photo_dimension":"Set to max dimension of photo to upload or 0 to disable",
+	"max_photo_dimension":0,
 
-	"max_vid_bytes":"Set to max photo size to upload.",
-	"max_vid_bytes":104857600,
+	"max_photo_pixels":"Set to max photo pixel count",
+	"max_photo_pixels":16000000,
+
+	"max_vid_bytes":"Set to max video size to upload or 0 to disable",
+	"max_vid_bytes":0,
+
+	"max_vid_res":"Set to max video resolution to upload or 0 to disable",
+	"max_vid_res":"1920x1080",
 
 	"epic_fail":"Set to the maximum failures before giving up during an upload",
+	"epic_fail":5,
+
+	"client_secret":"Path for client_secret.json donwloaded from https://console.developers.google.com/project/<PROJECT_ID>/apiui/credential ",
 	"epic_fail":5,
 
 	"domain":"Domain to use for auth.  Should probably just leave alone but I think this will work for other sites.  Cannot test myself.",

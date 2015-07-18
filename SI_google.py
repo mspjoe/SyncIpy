@@ -8,7 +8,8 @@ from datetime import datetime
 from PIL import Image
 import httplib2
 import gdata.data
-
+from datetime import timedelta
+import webbrowser
 
 class SI_google(object):
 		
@@ -41,6 +42,40 @@ class SI_google(object):
 				self.log.exception("sleeping for " + str(delay) + " seconds")
 				time.sleep(delay)
 				delay = delay * 2
+
+	def do_auth(self):
+		self.log.info('Obtaining new oauth2 token')
+		try:
+
+			scope='https://picasaweb.google.com/data/'
+			user_agent='SyncIpy'
+
+			
+			credentials = self.storage.get()
+			if credentials is None or credentials.invalid:
+			    flow = flow_from_clientsecrets(self.cfg['client_secret'], scope=scope, redirect_uri='urn:ietf:wg:oauth:2.0:oob')
+			    uri = flow.step1_get_authorize_url()
+			    webbrowser.open(uri)
+
+			    code = raw_input('Enter the authentication code: ').strip()
+			    credentials = flow.step2_exchange(code)
+			    self.storage.put(credentials)
+
+			if (credentials.token_expiry - datetime.utcnow()) < timedelta(minutes=5):
+			    http = httplib2.Http()
+			    http = credentials.authorize(http)
+			    credentials.refresh(http)
+
+			self.pws = gdata.photos.service.PhotosService(source=user_agent,
+	                                               email=self.cfg['email'],
+	                                               additional_headers={'Authorization' : 'Bearer %s' % credentials.access_token})
+		except Exception, e:
+			self.log.exception( "auth exception " + str(e))
+			self.log.info("Token request failed")
+			self.halt = 1
+		self.log.info("Token request succesful")
+
+
 	#GLOBALS
 	def __init__(self,publisher_id=None,tdbdir = None):
 		if tdbdir == None:
@@ -110,58 +145,9 @@ class SI_google(object):
 		c.execute('CREATE UNIQUE INDEX IF NOT EXISTS id2_'+PBT+' on '+PBT+' (SK ASC)')
 
 		if self.halt == 1: return
-
-		gdata.photos.service.SUPPORTED_UPLOAD_TYPES = ('bmp', 'jpeg', 'jpg', 'gif', 'png', 'mov', 'mpg', 'mpeg')
-		#self.pws = gdata.photos.service.PhotosService()
-
-
-
-
-		# How to use the OAuth 2.0 client is described here:
-		# https://developers.google.com/api-client-library/python/guide/aaa_oauth
-		USER_AGENT = ''
-		SCOPES = ['https://www.googleapis.com/auth/contacts.readonly','https://docs.google.com/feeds/']
-		print SCOPES
-		SCOPE=' '.join(SCOPES)
-		print "Scope"
-		print SCOPE
-
-		# client_secrets.json is downloaded from the API console:
-		# https://code.google.com/apis/console/#project:<PROJECT_ID>:access
-		# where <PROJECT_ID> is the ID of your project
-		 
-		flow = flow_from_clientsecrets(self.cfg['client_secret'],
-		                               scope=SCOPE,
-		                               redirect_uri='http://localhost')
-		 
-		storage = Storage(cfg_file + '.oa')
-		credentials = storage.get()
-
-
-		if credentials is None or credentials.invalid:
-			flags = tools.argparser.parse_args(args=[])
-			credentials = tools.run_flow(flow, storage, flags)
-
-		if credentials.access_token_expired:
-   			credentials.refresh(httplib2.Http())
-        
-		# Munge the data in the credentials into a gdata OAuth2Token
-		# This is based on information in this blog post:
-		# https://groups.google.com/forum/m/#!msg/google-apps-developer-blog/1pGRCivuSUI/3EAIioKp0-wJ
-		
-
-		self.log.info("Monkey Patching Auth Token and authorizing client")
-
-		oauth2token = gdata.gauth.OAuth2Token(client_id=credentials.client_id,
-                                  client_secret=credentials.client_secret,
-                                  scope=SCOPE,
-                                  access_token=credentials.access_token,
-                                  refresh_token=credentials.refresh_token,
-                                  user_agent=USER_AGENT)
-		# Authorize it
-
-		self.pws = oauth2token.authorize(gdata.photos.service.PhotosService())
-
+		self.storage = Storage(cfg_file + '.oa')
+		gdata.photos.service.SUPPORTED_UPLOAD_TYPES = ('bmp', 'jpeg', 'jpg', 'gif', 'png', 'mov', 'mpg', 'mpeg', 'mp4')
+		self.do_auth()
 
 		
    ### This function helps keep SQL calls out of many other functions
@@ -249,10 +235,6 @@ class SI_google(object):
 		else:
 			return None
 
-	
-
-		
-
 	def shrinkIfNeeded(self, path):
 		img = Image.open(path)
 		(w,h) = img.size
@@ -274,13 +256,17 @@ class SI_google(object):
 			return imagePath
 
 		if  self.cfg['max_photo_pixels'] > 0 and (w * h) > self.cfg['max_photo_pixels']:
-			self.log.info( "Shrinking " + path + " to " + str(self.cfg['max_photo_pixels']))
+			
 			imagePath = os.path.join(self.cfg['temp_dir'], os.path.basename(path))
 			
 			scaler=((w**.5)*(h**.5))/(self.cfg['max_photo_pixels']**.5)
 
-			
-			img2 = img.resize(w//scaler, h//scaler, Image.ANTIALIAS)
+	
+			new_w = int(w//scaler)
+			new_h = int(h//scaler)
+
+			self.log.info( "Shrinking " + path + " to " + str(new_h) + "x" + str(new_w)  )
+			img2 = img.resize((new_w, new_h), Image.ANTIALIAS)
 			img2.save(imagePath, 'JPEG', quality=99)
 			cmd = ['exiftool', '-TagsFromFile', path,'--Orientation', '--ImageSize', imagePath]
 			dn = open(os.devnull,"w")
@@ -345,6 +331,8 @@ class SI_google(object):
 						upload = self.pws.InsertVideo(album, picasa_photo, imagePath, content_type=contentType)
 					break
 				except gdata.photos.service.GooglePhotosException, e:
+					if e[2] == 'Token invalid - Invalid token: Token not found':
+						self.do_auth()
 					if e[2] == 'Photo limit reached.':
 						album_suf = album_suf + 1
 
@@ -631,6 +619,9 @@ class SI_google(object):
 def SI_google_cfg():
 	return ''' {
 
+	"email": "Email address used for account",
+	"email": "email@gmail.com",
+
 	"PATH": "Directory to be monitored",
 	"PATH": "/Users/Joe/Desktop/Temp/test",
 
@@ -695,7 +686,7 @@ def SI_google_cfg():
 	"epic_fail":5,
 
 	"client_secret":"Path for client_secret.json donwloaded from https://console.developers.google.com/project/<PROJECT_ID>/apiui/credential ",
-	"epic_fail":5,
+	"client_secret":"client_secret.json",
 
 	"domain":"Domain to use for auth.  Should probably just leave alone but I think this will work for other sites.  Cannot test myself.",
 	"domain":"default"
